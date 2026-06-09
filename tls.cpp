@@ -122,17 +122,38 @@ TlsParseResult parseClientHelloSni(const vector<uint8_t>& stream, string& server
             const uint16_t extensionLength = readBigEndian(body + offset + 2, 2);
             offset += 4;
 
+            printf(
+                "[EXT] type=%u (0x%04X) length=%u\n",
+                extensionType,
+                extensionType,
+                extensionLength
+            );
+
             if (offset + extensionLength > extensionsEnd)
                 return TlsParseResult::Invalid;
 
             if (extensionType == 0) {
                 const size_t extensionEnd = offset + extensionLength;
 
+                printf(
+                    "[SNI EXT] offset=%zu extensionLength=%u "
+                    "extensionEnd=%zu\n",
+                    offset,
+                    extensionLength,
+                    extensionEnd
+                );
+
                 if (extensionLength < 2)
                     return TlsParseResult::Invalid;
 
                 const uint16_t serverNameListLength = readBigEndian(body + offset, 2);
                 size_t nameOffset = offset + 2;
+
+                printf(
+                    "[SNI LIST] listLength=%u nameOffset=%zu\n",
+                    serverNameListLength,
+                    nameOffset
+                );
 
                 if (nameOffset + serverNameListLength != extensionEnd)
                     return TlsParseResult::Invalid;
@@ -158,6 +179,14 @@ TlsParseResult parseClientHelloSni(const vector<uint8_t>& stream, string& server
                         );
                         return TlsParseResult::SNIFound;
                     }
+
+                    printf(
+                        "[SNI NAME] type=%u length=%u value=\"%.*s\"\n",
+                        nameType,
+                        nameLength,
+                        int(nameLength),
+                        reinterpret_cast<const char*>(body + nameOffset)
+                    );
 
                     nameOffset += nameLength;
                 }
