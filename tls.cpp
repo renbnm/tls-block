@@ -136,8 +136,7 @@ TlsParseResult parseClientHelloSni(const vector<uint8_t>& stream, string& server
                 const size_t extensionEnd = offset + extensionLength;
 
                 printf(
-                    "[SNI EXT] offset=%zu extensionLength=%u "
-                    "extensionEnd=%zu\n",
+                    "[SNI EXT] offset=%zu extensionLength=%u extensionEnd=%zu\n",
                     offset,
                     extensionLength,
                     extensionEnd
@@ -146,28 +145,68 @@ TlsParseResult parseClientHelloSni(const vector<uint8_t>& stream, string& server
                 if (extensionLength < 2)
                     return TlsParseResult::Invalid;
 
-                const uint16_t serverNameListLength = readBigEndian(body + offset, 2);
+                const uint16_t serverNameListLength =
+                    readBigEndian(body + offset, 2);
+
                 size_t nameOffset = offset + 2;
 
                 printf(
-                    "[SNI LIST] listLength=%u nameOffset=%zu\n",
+                    "[SNI LIST] listLength=%u nameOffset=%zu extensionEnd=%zu\n",
                     serverNameListLength,
-                    nameOffset
+                    nameOffset,
+                    extensionEnd
                 );
 
-                if (nameOffset + serverNameListLength != extensionEnd)
+                if (nameOffset + serverNameListLength != extensionEnd) {
+                    printf(
+                        "[SNI LIST ERROR] nameOffset + listLength = %zu, extensionEnd = %zu\n",
+                        nameOffset + serverNameListLength,
+                        extensionEnd
+                    );
                     return TlsParseResult::Invalid;
+                }
 
                 while (nameOffset < extensionEnd) {
-                    if (nameOffset + 3 > extensionEnd)
+                    printf(
+                        "[SNI LOOP] nameOffset=%zu extensionEnd=%zu remain=%zu\n",
+                        nameOffset,
+                        extensionEnd,
+                        extensionEnd - nameOffset
+                    );
+
+                    if (nameOffset + 3 > extensionEnd) {
+                        printf("[SNI NAME ERROR] header too short\n");
                         return TlsParseResult::Invalid;
+                    }
 
                     const uint8_t nameType = body[nameOffset];
-                    const uint16_t nameLength = readBigEndian(body + nameOffset + 1, 2);
+                    const uint16_t nameLength =
+                        readBigEndian(body + nameOffset + 1, 2);
+
                     nameOffset += 3;
 
-                    if (nameOffset + nameLength > extensionEnd)
+                    printf(
+                        "[SNI NAME] type=%u length=%u nameOffset=%zu extensionEnd=%zu\n",
+                        nameType,
+                        nameLength,
+                        nameOffset,
+                        extensionEnd
+                    );
+
+                    if (nameOffset + nameLength > extensionEnd) {
+                        printf(
+                            "[SNI NAME ERROR] name end=%zu extensionEnd=%zu\n",
+                            nameOffset + nameLength,
+                            extensionEnd
+                        );
                         return TlsParseResult::Invalid;
+                    }
+
+                    printf(
+                        "[SNI VALUE] \"%.*s\"\n",
+                        int(nameLength),
+                        reinterpret_cast<const char*>(body + nameOffset)
+                    );
 
                     if (nameType == 0) {
                         if (nameLength == 0)
@@ -177,23 +216,18 @@ TlsParseResult parseClientHelloSni(const vector<uint8_t>& stream, string& server
                             reinterpret_cast<const char*>(body + nameOffset),
                             nameLength
                         );
+
+                        printf("[SNI FOUND] %s\n", serverName.c_str());
+
                         return TlsParseResult::SNIFound;
                     }
-
-                    printf(
-                        "[SNI NAME] type=%u length=%u value=\"%.*s\"\n",
-                        nameType,
-                        nameLength,
-                        int(nameLength),
-                        reinterpret_cast<const char*>(body + nameOffset)
-                    );
 
                     nameOffset += nameLength;
                 }
 
+                printf("[SNI EXT] no host_name entry\n");
                 return TlsParseResult::SNINotFound;
             }
-
             offset += extensionLength;
         }
 
