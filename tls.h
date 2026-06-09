@@ -7,8 +7,8 @@
 enum class TlsParseResult {
     NeedMore,
     Invalid,
-    NoServerName,
-    ServerNameFound
+    SNINotFound,
+    SNIFound
 };
 
 TlsParseResult parseClientHelloSni(
