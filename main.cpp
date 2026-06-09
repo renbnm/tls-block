@@ -217,6 +217,19 @@ int main(int argc, char* argv[]) {
             FlowState& state = it->second;
             const uint32_t seq = tcp->seq();
             const int32_t delta = static_cast<int32_t>(seq - state.nextSeq);
+            printf(
+                "[TCP] seq=%u expected=%u delta=%d "
+                "dataSize=%d streamSize=%zu "
+                "SYN=%d FIN=%d ACK=%d\n",
+                seq,
+                state.nextSeq,
+                delta,
+                dataSize,
+                state.stream.size(),
+                tcp->syn(),
+                tcp->fin(),
+                tcp->ackFlag()
+            );
 
             if (delta == 0) {
                 state.stream.insert(state.stream.end(), data, data + dataSize);
@@ -232,7 +245,13 @@ int main(int argc, char* argv[]) {
                     state.nextSeq += uint32_t(dataSize) - overlap;
                 }
             } else {
-                // 중간 segment를 놓친 경우 현재 flow는 정확히 복원할 수 없다.
+                printf(
+                    "[DROP] TCP gap or out-of-order: "
+                    "seq=%u expected=%u delta=%d\n",
+                    seq,
+                    state.nextSeq,
+                    delta
+                );
                 flows.erase(it);
                 continue;
             }
