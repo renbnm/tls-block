@@ -249,10 +249,19 @@ int main(int argc, char* argv[]) {
         const TlsParseResult parseResult =
             parseClientHelloSni(it->second.stream, serverName);
 
-        if (parseResult == TlsParseResult::NeedMore)
+        if (parseResult == TlsParseResult::Invalid) {
+            printf("invalid TLS ClientHello\n");
+            flows.erase(it);
             continue;
+        }
+        
+        if (parseResult == TlsParseResult::NeedMore){
+            printf("needmore\n");
+            continue;
+        }
 
-        if (parseResult != TlsParseResult::ServerNameFound) {
+        if (parseResult != TlsParseResult::SNINotFound) {
+            printf("SNI not found\n");
             flows.erase(it);
             continue;
         }
