@@ -29,13 +29,21 @@ struct FlowKey {
     uint16_t dport;
 
     bool operator<(const FlowKey& r) const {
-        return tie(sip, dip, sport, dport) < tie(r.sip, r.dip, r.sport, r.dport);
+        return tie(sip, dip, sport, dport) <
+               tie(r.sip, r.dip, r.sport, r.dport);
     }
 };
 
 struct FlowState {
     vector<uint8_t> stream;
+
+    // 서버가 다음에 받아야 하는 client -> server 방향의 TCP SEQ
     uint32_t nextSeq = 0;
+
+    // 클라이언트가 다음에 받아야 하는 server -> client 방향의 TCP SEQ
+    // 관찰한 client 패킷의 ACK 값을 저장한다.
+    uint32_t serverNextSeq = 0;
+
     chrono::steady_clock::time_point updated;
 };
 
@@ -81,6 +89,50 @@ string lowerHost(string host) {
     return host;
 }
 
+// host가 domain 자체이거나 domain의 하위 도메인인지 검사한다.
+// 예: www.youtube.com은 youtube.com과 일치하지만,
+//     notyoutube.com은 youtube.com과 일치하지 않는다.
+bool domainMatch(const string& host, const string& domain) {
+    if (host == domain)
+        return true;
+
+    if (host.size() <= domain.size())
+        return false;
+
+    const size_t start = host.size() - domain.size();
+
+    return host[start - 1] == '.' &&
+           host.compare(start, domain.size(), domain) == 0;
+}
+
+bool matchHost(const string& host, const string& target) {
+    // 입력한 도메인 자체와 모든 하위 도메인을 차단한다.
+    if (domainMatch(host, target))
+        return true;
+
+    // youtube.com 또는 그 하위 도메인을 입력한 경우
+    // YouTube 서비스가 실제로 사용하는 별도 도메인도 함께 차단한다.
+    if (domainMatch(target, "youtube.com")) {
+        static const char* youtubeDomains[] = {
+            "youtu.be",
+            "youtube-nocookie.com",
+            "googlevideo.com",
+            "ytimg.com",
+            "youtubei.googleapis.com",
+            "youtube.googleapis.com",
+            "ggpht.com",
+            "googleads.g.doubleclick.net"
+        };
+
+        for (const char* domain : youtubeDomains) {
+            if (domainMatch(host, domain))
+                return true;
+        }
+    }
+
+    return false;
+}
+
 int main(int argc, char* argv[]) {
     if (argc != 3) {
         printf("syntax : tls-block <interface> <server name>\n");
@@ -123,8 +175,15 @@ int main(int argc, char* argv[]) {
         return -1;
     }
 
+    // ClientHello 방향인 client -> server TCP/443 패킷만 캡처한다.
     struct bpf_program filter{};
-    if (pcap_compile(handle, &filter, "tcp", 1, PCAP_NETMASK_UNKNOWN) == 0) {
+    if (pcap_compile(
+            handle,
+            &filter,
+            "tcp dst port 443",
+            1,
+            PCAP_NETMASK_UNKNOWN
+        ) == 0) {
         pcap_setfilter(handle, &filter);
         pcap_freecode(&filter);
     }
@@ -205,37 +264,35 @@ int main(int argc, char* argv[]) {
 
         if (it == flows.end()) {
             // TLS Handshake record: ContentType 0x16, legacy version 0x03xx
-            if (data[0] != 0x16 || (dataSize >= 2 && data[1] != 0x03))
+            if (dataSize < 2 || data[0] != 0x16 || data[1] != 0x03)
                 continue;
 
             FlowState state;
             state.stream.insert(state.stream.end(), data, data + dataSize);
+
+            // SYN과 FIN도 TCP sequence space를 각각 1씩 소비한다.
             state.nextSeq = tcp->seq() + uint32_t(dataSize);
+            if (tcp->syn()) state.nextSeq++;
+            if (tcp->fin()) state.nextSeq++;
+
+            state.serverNextSeq = tcp->ack();
             state.updated = now;
             it = flows.emplace(key, move(state)).first;
         } else {
             FlowState& state = it->second;
             const uint32_t seq = tcp->seq();
             const int32_t delta = static_cast<int32_t>(seq - state.nextSeq);
-            printf(
-                "[TCP] seq=%u expected=%u delta=%d "
-                "dataSize=%d streamSize=%zu "
-                "SYN=%d FIN=%d ACK=%d\n",
-                seq,
-                state.nextSeq,
-                delta,
-                dataSize,
-                state.stream.size(),
-                tcp->syn(),
-                tcp->fin(),
-                tcp->ackFlag()
-            );
 
             if (delta == 0) {
                 state.stream.insert(state.stream.end(), data, data + dataSize);
                 state.nextSeq += uint32_t(dataSize);
+
+                if (tcp->syn()) state.nextSeq++;
+                if (tcp->fin()) state.nextSeq++;
             } else if (delta < 0) {
+                // 이미 받은 범위와 겹치는 재전송이면 새로운 부분만 추가한다.
                 const uint32_t overlap = uint32_t(-delta);
+
                 if (overlap < uint32_t(dataSize)) {
                     state.stream.insert(
                         state.stream.end(),
@@ -245,17 +302,15 @@ int main(int argc, char* argv[]) {
                     state.nextSeq += uint32_t(dataSize) - overlap;
                 }
             } else {
-                printf(
-                    "[DROP] TCP gap or out-of-order: "
-                    "seq=%u expected=%u delta=%d\n",
-                    seq,
-                    state.nextSeq,
-                    delta
-                );
+                // 중간 segment가 빠졌거나 out-of-order인 경우에는
+                // 현재 단순 재조립 방식으로 정확히 복원할 수 없다.
                 flows.erase(it);
                 continue;
             }
 
+            // 현재 client 패킷의 ACK가 클라이언트가 기대하는
+            // 다음 server -> client SEQ다.
+            state.serverNextSeq = tcp->ack();
             state.updated = now;
         }
 
@@ -266,49 +321,29 @@ int main(int argc, char* argv[]) {
 
         string serverName;
         const TlsParseResult parseResult =
-            parseClientHelloSni(
-                it->second.stream,
-                serverName
-            );
+            parseClientHelloSni(it->second.stream, serverName);
 
-        printf(
-            "[PARSE] result=%d streamSize=%zu serverName=\"%s\" target=\"%s\"\n",
-            static_cast<int>(parseResult),
-            it->second.stream.size(),
-            serverName.c_str(),
-            target.c_str()
-        );
-
-        if (parseResult == TlsParseResult::NeedMore) {
-            printf("[PARSE] NeedMore\n");
+        if (parseResult == TlsParseResult::NeedMore)
             continue;
-        }
 
-        if (parseResult == TlsParseResult::Invalid) {
-            printf("[PARSE] Invalid\n");
-            flows.erase(it);
-            continue;
-        }
-
-        if (parseResult == TlsParseResult::SNINotFound) {
-            printf("[PARSE] SNINotFound\n");
+        if (parseResult == TlsParseResult::Invalid ||
+            parseResult == TlsParseResult::SNINotFound) {
             flows.erase(it);
             continue;
         }
 
         const string parsedHost = lowerHost(serverName);
 
-        printf(
-            "[SNI] parsed=\"%s\" target=\"%s\"\n",
-            parsedHost.c_str(),
-            target.c_str()
-        );
-
-        if (parsedHost != target) {
-            printf("[SNI] mismatch\n");
+        if (!matchHost(parsedHost, target)) {
             flows.erase(it);
             continue;
         }
+
+        // 지금까지 재조립한 전체 client 데이터를 기준으로 갱신된 SEQ를 사용한다.
+        // 현재 패킷의 seq + dataSize를 다시 계산하면 재전송/중복 segment에서
+        // 이전 값이 들어갈 수 있으므로 FlowState의 nextSeq를 사용한다.
+        const uint32_t clientNextSeq = it->second.nextSeq;
+        const uint32_t serverNextSeq = it->second.serverNextSeq;
 
         // Forward: client -> server, Ethernet + IPv4 + TCP RST/ACK
         uint8_t forward[sizeof(EthHdr) + sizeof(IpHdr) + sizeof(TcpHdr)]{};
@@ -335,8 +370,8 @@ int main(int argc, char* argv[]) {
 
         ft->sport_ = tcp->sport_;
         ft->dport_ = tcp->dport_;
-        ft->seq_ = htonl(tcp->seq() + uint32_t(dataSize));
-        ft->ack_ = tcp->ack_;
+        ft->seq_ = htonl(clientNextSeq);
+        ft->ack_ = htonl(serverNextSeq);
         ft->off_rsvd_ = 5 << 4;
         ft->flags_ = TcpHdr::RST | TcpHdr::ACK;
 
@@ -364,8 +399,8 @@ int main(int argc, char* argv[]) {
 
         bt->sport_ = tcp->dport_;
         bt->dport_ = tcp->sport_;
-        bt->seq_ = tcp->ack_;
-        bt->ack_ = htonl(tcp->seq() + uint32_t(dataSize));
+        bt->seq_ = htonl(serverNextSeq);
+        bt->ack_ = htonl(clientNextSeq);
         bt->off_rsvd_ = 5 << 4;
         bt->flags_ = TcpHdr::RST | TcpHdr::ACK;
 
@@ -387,12 +422,17 @@ int main(int argc, char* argv[]) {
             perror("backward send");
 
         printf(
-            "blocked SNI=%s %s:%u -> %s:%u\n",
+            "blocked SNI=%s %s:%u -> %s:%u "
+            "forward(seq=%u ack=%u) backward(seq=%u ack=%u)\n",
             parsedHost.c_str(),
             string(ip->sip()).c_str(),
             uint16_t(tcp->sport()),
             string(ip->dip()).c_str(),
-            uint16_t(tcp->dport())
+            uint16_t(tcp->dport()),
+            clientNextSeq,
+            serverNextSeq,
+            serverNextSeq,
+            clientNextSeq
         );
 
         flows.erase(it);
