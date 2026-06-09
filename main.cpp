@@ -266,28 +266,46 @@ int main(int argc, char* argv[]) {
 
         string serverName;
         const TlsParseResult parseResult =
-            parseClientHelloSni(it->second.stream, serverName);
+            parseClientHelloSni(
+                it->second.stream,
+                serverName
+            );
+
+        printf(
+            "[PARSE] result=%d streamSize=%zu serverName=\"%s\" target=\"%s\"\n",
+            static_cast<int>(parseResult),
+            it->second.stream.size(),
+            serverName.c_str(),
+            target.c_str()
+        );
+
+        if (parseResult == TlsParseResult::NeedMore) {
+            printf("[PARSE] NeedMore\n");
+            continue;
+        }
 
         if (parseResult == TlsParseResult::Invalid) {
-            printf("invalid TLS ClientHello\n");
+            printf("[PARSE] Invalid\n");
             flows.erase(it);
             continue;
         }
-        
-        if (parseResult == TlsParseResult::NeedMore){
-            printf("needmore\n");
-            continue;
-        }
 
-        if (parseResult != TlsParseResult::SNINotFound) {
-            printf("SNI not found\n");
+        if (parseResult == TlsParseResult::SNINotFound) {
+            printf("[PARSE] SNINotFound\n");
             flows.erase(it);
             continue;
         }
 
         const string parsedHost = lowerHost(serverName);
 
+        printf(
+            "[SNI] parsed=\"%s\" target=\"%s\"\n",
+            parsedHost.c_str(),
+            target.c_str()
+        );
+
         if (parsedHost != target) {
+            printf("[SNI] mismatch\n");
             flows.erase(it);
             continue;
         }
